@@ -2,15 +2,13 @@ use core::ffi::c_size_t;
 use std::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
     ffi::c_void,
-    mem::align_of,
     ptr::{self, NonNull},
 };
 
-use crate::util::hint::cold;
-
-// https://gee.cs.oswego.edu/dl/html/malloc.html
-
-pub const DLMALLOC_MIN_ALIGN: usize = 8;
+use crate::util::{
+    assert::{aligned_to, non_null},
+    hint::cold,
+};
 
 #[link(name = "dlmalloc", kind = "static")]
 extern "C" {
@@ -31,6 +29,9 @@ extern "C" {
 pub struct DlMalloc(());
 
 impl DlMalloc {
+    /// The minimum alignment that `DlMalloc` allocates to
+    pub const MIN_ALIGN: usize = 8;
+
     /// Construct a new `DlMalloc` allocator. This is a no-op.
     ///
     /// # Safety
@@ -63,8 +64,8 @@ impl DlMalloc {
     }
 
     /// # Safety
-    /// 
-    /// The safety requirements for this function are the same as those for 
+    ///
+    /// The safety requirements for this function are the same as those for
     /// `dlfree()` or `GlobalAlloc::deallocate()` -- whichever is stricter.
     pub(crate) unsafe fn dlfree(&self, data: *mut c_void) {
         free(data);
@@ -73,7 +74,7 @@ impl DlMalloc {
 
 unsafe impl Allocator for DlMalloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let data = if layout.align() <= DLMALLOC_MIN_ALIGN {
+        let data = if layout.align() <= DlMalloc::MIN_ALIGN {
             self.dlmalloc(layout.size())
         } else {
             cold(|| self.dlmemalign(layout.size(), layout.align()))
@@ -89,11 +90,12 @@ unsafe impl Allocator for DlMalloc {
         }
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, _: Layout) {
+    unsafe fn deallocate(&self, data: NonNull<u8>, layout: Layout) {
+        debug_assert!(aligned_to(data.as_ptr(), layout.align()));
         // SAFETY:
         // - Identical contract to caller, which is described in `Allocator`
         //   docs.
-        unsafe { self.dlfree(ptr.as_ptr() as _) };
+        unsafe { self.dlfree(data.as_ptr() as _) };
     }
 }
 
@@ -103,12 +105,11 @@ unsafe impl GlobalAlloc for DlMalloc {
     }
 
     unsafe fn dealloc(&self, data: *mut u8, layout: Layout) {
-        // TODO: add debug assertions
-
+        debug_assert!(non_null(data));
         // SAFETY: We're totally fine to cast this to non-null, because
         // the caller is required to give a pointer to an allocation made by
         // this allocator. No allocator can return the null-pointer as an
         // allocation!
-        unsafe { self.deallocate(NonNull::new_unchecked(data), layout) }
+        self.deallocate(NonNull::new_unchecked(data), layout)
     }
 }
