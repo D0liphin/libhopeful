@@ -1,6 +1,16 @@
 [package]
-name = "dissertation"
+name = "lhl"
 version = "0.1.0"
 edition = "2021"
+description = "Logical heap visualisation in Rust"
 
 [dependencies]
+crossbeam = "0.8.4"
+once_cell = "1.19.0"
+
+[build-dependencies]
+cc = "1.0.90"
+
+[profile.rg]
+inherits = "release"
+debug = true

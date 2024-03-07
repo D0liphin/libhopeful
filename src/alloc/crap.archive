@@ -1,0 +1,129 @@
+// #[non_exhaustive]
+// pub enum AllocMetaParseError {
+//     /// The `AllocMeta` is missing a header
+//     MissingHeader,
+//     /// The `AllocMeta` has a bad size (e.g. it overflows the provided buffer)
+//     InvalidSize,
+//     /// The name field is missing a nul-terminator. No idea why this is called
+//     /// nul and not null, but whatever.
+//     NameMissingNul,
+//     /// The `name` field contains invalid utf-8
+//     NonUtf8Name,
+// }
+
+// /// Indicates that something is a pointer which can be interpreted as a raw
+// /// address.
+// pub trait Address<Pointee> {
+//     fn as_usize(&self) -> usize;
+
+//     fn alloc_meta(&self) -> Option<&'static AllocMeta> {
+//         ALLOC_META_INDEX.get(self.as_usize())
+//     }
+// }
+
+// impl<'a, Pointee> Address<Pointee> for &'a Pointee {
+//     fn as_usize(&self) -> usize {
+//         *self as *const Pointee as usize
+//     }
+// }
+
+// impl<Pointee> Address<Pointee> for *const Pointee {
+//     fn as_usize(&self) -> usize {
+//         *self as usize
+//     }
+// }
+
+// impl<Pointee> Address<Pointee> for *mut Pointee {
+//     fn as_usize(&self) -> usize {
+//         *self as usize
+//     }
+// }
+
+// tropic thunder
+
+impl AllocMeta {
+    // pub const UNKNOWN_TYPE_NAME: &'static str = "{unknown}";
+
+    // /// # Safety
+    // ///
+    // /// Must be derived from a genuine allocation
+    // pub unsafe fn from_alloc<T>(data: *mut T, layout: Layout) -> Self {
+    //     Self {
+    //         alloc_id: AllocId::new(data as _, layout.size()),
+    //         align: layout.align(),
+    //         name: Self::UNKNOWN_TYPE_NAME,
+    //     }
+    // }
+
+    // /// [`AllocMeta`] is stored with the following layout, here each `[ .. ]`
+    // /// section represents 64 bits. All values are little endian.
+    // /// ```no_run
+    // /// [ type_info_size ] // the size of the record (including this
+    // ///                    // header) in bytes
+    // /// [      size      ] // the `.size` field
+    // /// [      align     ] // the `.align` field
+    // /// [      name      ] // the null-terminated `name` of this type
+    // /// ```
+    // pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, AllocMetaParseError> {
+    //     if bytes.len() < size_of::<u64>() * 3 {
+    //         return Err(AllocMetaParseError::MissingHeader);
+    //     }
+
+    //     let record_size =
+    //         u64::from_le_bytes(bytes[0..8].try_into().expect("size of `bytes` asserted"));
+    //     let size = u64::from_le_bytes(bytes[8..16].try_into().expect("size of `bytes` asserted"));
+    //     let align = u64::from_le_bytes(bytes[16..24].try_into().expect("size of `bytes` asserted"));
+
+    //     if record_size > bytes.len() as _ {
+    //         return Err(AllocMetaParseError::InvalidSize);
+    //     }
+
+    //     let bytes = &bytes[24..];
+
+    //     let mut name_strlen = 0;
+    //     let mut found_nul = false;
+    //     for (i, &b) in bytes.iter().enumerate() {
+    //         if b == b'\0' {
+    //             name_strlen = i;
+    //             found_nul = true;
+    //             break;
+    //         }
+    //     }
+    //     if !found_nul {
+    //         return Err(AllocMetaParseError::NameMissingNul);
+    //     }
+
+    //     let name = std::str::from_utf8(&bytes[..=name_strlen])
+    //         .map_err(|_| AllocMetaParseError::NonUtf8Name)?;
+
+    //     Ok(Self {
+    //         size,
+    //         align,
+    //         name,
+    //     })
+    // }
+
+    // /// Get the size of this record in bytes (header and all)
+    // pub fn size_hint(&self) -> usize {
+    //     size_of::<u64>() * 3 + self.name.len() + 1
+    // }
+
+    // /// Store this struct as packed bytes, appending to `buf`. Failures (`None`)
+    // /// will still write to `buf`.
+    // pub fn as_bytes(&self, buf: &mut [u8]) -> Option<usize> {
+    //     let record_size = self.size_hint();
+    //     if buf.len() < record_size {
+    //         return None;
+    //     }
+
+    //     let mut buf_writer = BufWriter::new(buf);
+    //     // These will all succeed if `buf` can hold `record_size`
+    //     _ = buf_writer.write_all(&record_size.to_le_bytes());
+    //     _ = buf_writer.write_all(&self.size.to_le_bytes());
+    //     _ = buf_writer.write_all(&self.align.to_le_bytes());
+    //     _ = buf_writer.write_all(self.name.as_bytes());
+    //     _ = buf_writer.flush();
+
+    //     Some(record_size)
+    // }
+}
