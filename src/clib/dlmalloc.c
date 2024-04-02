@@ -637,7 +637,7 @@ MAX_RELEASE_CHECK_RATE   default: 4095 unless not HAVE_MMAP
 #define MALLOC_INSPECT_ALL 0
 #endif  /* MALLOC_INSPECT_ALL */
 #ifndef HAVE_MMAP
-#define HAVE_MMAP 1
+#define HAVE_MMAP 0 // DIFFERS FROM DEFAULT
 #endif  /* HAVE_MMAP */
 #ifndef MMAP_CLEARS
 #define MMAP_CLEARS 1
@@ -809,6 +809,8 @@ extern "C" {
 #endif
 
 #if !ONLY_MSPACES
+
+#define USE_DL_PREFIX
 
 /* ------------------- Declarations of public routines ------------------- */
 

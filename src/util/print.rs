@@ -8,3 +8,15 @@ extern "C" {
 pub fn putstr(s: &CStr) {
     unsafe { puts(s.as_ptr()) }
 }
+
+/// Basically just `println!()` but chucks the thread name in front of it!
+#[macro_export]
+macro_rules! thread_println {
+    ($($arg:tt)*) => {
+        println!(
+            "[{}] {}", 
+            ::std::thread::current().name().unwrap_or("{unknown}"), 
+            format_args!($($arg)*)
+        )
+    };
+}

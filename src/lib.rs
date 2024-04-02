@@ -5,7 +5,9 @@
     lazy_cell,
     c_size_t,
     unchecked_math,
-    alloc_layout_extra
+    alloc_layout_extra,
+    const_slice_from_raw_parts_mut,
+    slice_ptr_len
 )]
 
 pub mod alloc;

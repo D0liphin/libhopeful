@@ -39,3 +39,5 @@ language's goals. For example Haskell is not 'overly managed', while I
 think that I would probably say Java *is*. One could argue that 
 something like C or C++ is "under managed"... though I would only agree
 with the latter.
+
+

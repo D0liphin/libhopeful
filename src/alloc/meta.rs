@@ -17,7 +17,6 @@ use std::{
 
 // use crate::alloc::global::ALLOC_META_INDEX;
 
-use super::manual::Raw;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AllocId {

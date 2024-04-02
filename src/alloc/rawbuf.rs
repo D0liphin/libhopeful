@@ -1,36 +1,34 @@
-use std::{
-    cell::Cell,
-    mem::MaybeUninit,
-    ptr::{self, NonNull},
-    slice,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+// use std::{
+//     cell::Cell,
+//     mem::MaybeUninit,
+//     ptr::{self, NonNull},
+//     slice,
+//     sync::atomic::{AtomicUsize, Ordering},
+// };
 
-use super::manual::Raw;
+// pub struct DynArray<T> {
+//     data: Raw<[MaybeUninit<T>]>,
+//     len: AtomicUsize,
+// }
 
-pub struct DynArray<T> {
-    data: Raw<[MaybeUninit<T>]>,
-    len: AtomicUsize,
-}
+// impl<T> DynArray<T> {
+//     pub fn new() -> Self {
+//         // TODO: Safety comments for all three unsafe blocks
+//         let data = ptr::slice_from_raw_parts_mut::<MaybeUninit<T>>(NonNull::dangling().as_ptr(), 0);
+//         let data = unsafe { NonNull::new_unchecked(data) };
+//         let data = unsafe { Raw::new(data) };
+//         Self {
+//             data,
+//             len: AtomicUsize::new(0),
+//         }
+//     }
 
-impl<T> DynArray<T> {
-    pub fn new() -> Self {
-        // TODO: Safety comments for all three unsafe blocks
-        let data = ptr::slice_from_raw_parts_mut::<MaybeUninit<T>>(NonNull::dangling().as_ptr(), 0);
-        let data = unsafe { NonNull::new_unchecked(data) };
-        let data = unsafe { Raw::new(data) };
-        Self {
-            data,
-            len: AtomicUsize::new(0),
-        }
-    }
+//     pub fn len(&self) -> usize {
+//         self.len.load(Ordering::SeqCst)
+//     }
 
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::SeqCst)
-    }
-
-    // fn realloc(&self) {}
-}
+//     // fn realloc(&self) {}
+// }
 
 /*
 I'm trying to make a lock-free `Vec` in Rust. I'm working on reallocation.

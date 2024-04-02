@@ -4,6 +4,9 @@ pub fn aligned_to<T>(ptr: *mut T, align: usize) -> bool {
 }
 
 /// Test if this pointer is non-null (`true` if it is non-null)
-pub fn non_null<T>(ptr: *mut T) -> bool {
+pub fn non_null<T>(ptr: *mut T) -> bool
+where
+    T: ?Sized,
+{
     !ptr.is_null()
 }

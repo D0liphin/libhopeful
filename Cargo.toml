@@ -5,7 +5,9 @@ edition = "2021"
 description = "Logical heap visualisation in Rust"
 
 [dependencies]
+bytemuck = { version = "1.14.3", features = ["zeroable_atomics"] }
 crossbeam = "0.8.4"
+linux-futex = "0.2.0"
 once_cell = "1.19.0"
 
 [build-dependencies]

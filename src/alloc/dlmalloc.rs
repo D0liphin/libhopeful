@@ -12,15 +12,15 @@ use crate::util::{
 
 #[link(name = "dlmalloc", kind = "static")]
 extern "C" {
-    pub(crate) fn malloc(_: c_size_t) -> *mut c_void;
+    pub(crate) fn dlmalloc(_: c_size_t) -> *mut c_void;
 
-    pub(crate) fn free(_: *mut c_void);
+    pub(crate) fn dlfree(_: *mut c_void);
 
     // TODO: use it
     #[allow(unused)]
-    pub(crate) fn realloc(_: *mut c_void, _: c_size_t) -> *mut c_void;
+    pub(crate) fn dlrealloc(_: *mut c_void, _: c_size_t) -> *mut c_void;
 
-    pub(crate) fn memalign(_: c_size_t, _: c_size_t) -> *mut c_void;
+    pub(crate) fn dlmemalign(_: c_size_t, _: c_size_t) -> *mut c_void;
 }
 
 /// A wrapper around `dlmalloc()`. Options are configured in
@@ -52,7 +52,7 @@ impl DlMalloc {
         // SAFETY:
         // - Constructor has asserted that `DlMalloc` has complete ownership
         //   over the heap, so this will not interfere with anything else.
-        unsafe { malloc(size) }
+        unsafe { dlmalloc(size) }
     }
 
     /// Safe version of `dlmemalign()`.
@@ -60,7 +60,7 @@ impl DlMalloc {
         // SAFETY:
         // - Constructor has asserted that `DlMalloc` has complete ownership
         //   over the heap, so this will not interfere with anything else.
-        unsafe { memalign(size, align) }
+        unsafe { dlmemalign(size, align) }
     }
 
     /// # Safety
@@ -68,7 +68,7 @@ impl DlMalloc {
     /// The safety requirements for this function are the same as those for
     /// `dlfree()` or `GlobalAlloc::deallocate()` -- whichever is stricter.
     pub(crate) unsafe fn dlfree(&self, data: *mut c_void) {
-        free(data);
+        dlfree(data);
     }
 }
 
