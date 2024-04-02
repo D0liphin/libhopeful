@@ -420,7 +420,7 @@
 // */
 use std::{
     cell::UnsafeCell,
-    cmp, fmt, mem,
+    cmp, fmt,
     sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -445,11 +445,16 @@ fn index_offset(index: usize) -> (usize, usize) {
     (chunk_index, bit_offset)
 }
 
+/// RAII read guard. If one of these exists, you have full read access (i.e. you
+/// can get a `&Unique<AtomicBitChunk>` from the `BitMap`). `Drop` impl releases
+/// the lock
 pub struct ReadGuard<'a> {
     bit_map: &'a BitMap,
 }
 
 impl<'a> ReadGuard<'a> {
+    /// Construct a new `ReadGuard`, doing all the correct synchronisation stuff
+    /// maybe block!
     fn new(bit_map: &'a BitMap) -> Self {
         bit_map.inc_nr_readers();
         Self { bit_map }
@@ -463,6 +468,8 @@ impl<'a> Drop for ReadGuard<'a> {
     }
 }
 
+/// Store the `chunk_index` and `bit_index` components of a bit index. Also
+/// contains a guard, so `&` operations will always be safe!
 pub struct BitHandle<'a> {
     read_guard: ReadGuard<'a>,
     chunk_index: usize,
@@ -470,6 +477,7 @@ pub struct BitHandle<'a> {
 }
 
 impl<'a> BitHandle<'a> {
+    /// Construct a new [`BitHandle`], acquiring a guard in the process
     fn new(bit_map: &'a BitMap, index: usize) -> Self {
         let (chunk_index, bit_index) = index_offset(index);
         Self {
@@ -479,15 +487,20 @@ impl<'a> BitHandle<'a> {
         }
     }
 
+    /// Get the internal [`BitMap`]
     fn bit_map(&self) -> &BitMap {
         self.read_guard.bit_map
     }
 
+    /// Get the internal buf pointer for reads
     fn buf(&self) -> &Unique<[AtomicBitChunk], DlMalloc> {
         // TODO: Safety
         unsafe { &*self.read_guard.bit_map.buf.get() }
     }
 
+    /// Check that we can actually do stuff with this bit-handle. If we can't,
+    /// *temporarily* release this lock and realloc the [`BitMap`]'s buffer to 
+    /// fit.
     fn ensure_index_exists(&self) {
         thread_println!("ensure_index_exists()");
         if !self.bit_map().chunk_in_bounds(self.chunk_index) {
@@ -508,10 +521,19 @@ impl<'a> BitHandle<'a> {
         self.bit_map().inc_nr_readers();
     }
 
+    /// Set the bit at this index to `1`
     pub fn set_high(self) {
         self.ensure_index_exists();
         // Now we know that the index exists!
         self.buf().as_slice()[self.chunk_index].fetch_or(1 << self.bit_index, Ordering::Release);
+    }
+
+    /// Set the bit at this index to `0`
+    pub fn set_low(self) {
+        self.ensure_index_exists();
+        // Now we know that the index exists!
+        self.buf().as_slice()[self.chunk_index]
+            .fetch_and(!(1 << self.bit_index), Ordering::Release);
     }
 }
 
@@ -541,7 +563,10 @@ impl fmt::Debug for BitMap {
 // TODO: Safety comment
 unsafe impl Sync for BitMap {}
 
+/// This futex represents a lock and is unlocked
 const FUTEX_UNLOCKED: u32 = 0;
+
+/// THis futex represents a lock and is locked
 const FUTEX_LOCKED: u32 = 1;
 
 impl BitMap {
@@ -654,9 +679,20 @@ impl BitMap {
         BitHandle::new(self, index)
     }
 
+    /// Set the bit at `index` to `1`, allocate extra space if we can't fit it
+    /// in the current buffer, see struct-level documentation for the allocation
+    /// strategy
     pub fn set_high(&self, index: usize) {
         thread_println!("set_high({index})");
         self.get(index).set_high();
+    }
+
+    /// Set the bit at `index` to `0`, allocate extra space if we can't fit it
+    /// in the current buffer, see struct-level documentation for the allocation
+    /// strategy
+    pub fn set_low(&self, index: usize) {
+        thread_println!("set_low({index})");
+        self.get(index).set_low();
     }
 
     /// Attempt to lock this `BitMap` for writer access. If another writer holds
@@ -683,11 +719,16 @@ impl BitMap {
         }
     }
 
+    /// I've finished writing... okay, other writers can write now!
     fn release_writer_lock(&self) {
         fence(Ordering::Release);
         self.writer_lock
             .value
             .store(FUTEX_UNLOCKED, Ordering::Release);
+        // Loads of writers are going to be waiting on this -- we wake them all
+        // and _hopefully_ they all realise that they don't need to allocate!
+        // see Self::grow() for more comments...
+        self.writer_lock.wake(i32::MAX);
     }
 
     /// Check if the chunk_index at the specified index is within bounds
@@ -695,7 +736,10 @@ impl BitMap {
         self.buf_len.load(Ordering::Acquire) > chunk_index
     }
 
-    /// Double the size of this
+    /// Grow this bit map to fit a chunk at a certain index (this is a chunk!,
+    /// not a bit). The bit-map will eagerly grow exponentially...
+    ///
+    /// TODO: perhaps that growth strategy is not to be desired??
     pub fn grow(&self, to_fit_chunk_at: usize) {
         thread_println!("grow({to_fit_chunk_at})");
         let chunk_index = to_fit_chunk_at;
@@ -706,6 +750,8 @@ impl BitMap {
                 return;
             }
             thread_println!("grow(): try_acquire_writer_lock()");
+            // This is a continuation of the comments in
+            // `try_acquire_writer_lock()`
             if self.try_acquire_writer_lock() {
                 thread_println!("grow(): got writer_lock!");
                 break;
