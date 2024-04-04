@@ -419,16 +419,28 @@
 // compare exchange on the length of
 // */
 use std::{
+    alloc::Allocator,
     cell::UnsafeCell,
-    cmp, fmt,
+    cmp,
+    ffi::CStr,
+    fmt,
+    io::{Cursor, Write},
+    mem,
     sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering},
 };
 
+use libc::{c_char, fputs, putchar, puts};
 use linux_futex::{Futex, Private};
 
-use crate::{thread_println, util::num::log2ceil};
+use crate::{
+    put, putln, thread_println,
+    util::{
+        num::log2ceil,
+        print::{endl, putstr, write_usize, ArrayIter, AsciiRepr, Bits, MAX_NR_CHARS_USIZE},
+    },
+};
 
-use super::{dlmalloc::DlMalloc, manual::Unique};
+use super::manual::Unique;
 
 pub type AtomicBitChunk = AtomicU64;
 pub type BitChunk = u64;
@@ -448,37 +460,53 @@ fn index_offset(index: usize) -> (usize, usize) {
 /// RAII read guard. If one of these exists, you have full read access (i.e. you
 /// can get a `&Unique<AtomicBitChunk>` from the `BitMap`). `Drop` impl releases
 /// the lock
-pub struct ReadGuard<'a> {
-    bit_map: &'a BitMap,
+pub struct ReadGuard<'a, A>
+where
+    A: Allocator,
+{
+    bit_map: &'a BitMap<A>,
 }
 
-impl<'a> ReadGuard<'a> {
+impl<'a, A> ReadGuard<'a, A>
+where
+    A: Allocator,
+{
     /// Construct a new `ReadGuard`, doing all the correct synchronisation stuff
     /// maybe block!
-    fn new(bit_map: &'a BitMap) -> Self {
+    fn new(bit_map: &'a BitMap<A>) -> Self {
+        // put!("ReadGuard::new() ", *bit_map, endl());
         bit_map.inc_nr_readers();
         Self { bit_map }
     }
 }
 
-impl<'a> Drop for ReadGuard<'a> {
+impl<'a, A> Drop for ReadGuard<'a, A>
+where
+    A: Allocator,
+{
     fn drop(&mut self) {
-        thread_println!("ReadGuard::drop()");
+        // putln!("ReadGuard::drop() ", *self.bit_map);
         self.bit_map.dec_nr_readers();
     }
 }
 
 /// Store the `chunk_index` and `bit_index` components of a bit index. Also
 /// contains a guard, so `&` operations will always be safe!
-pub struct BitHandle<'a> {
-    read_guard: ReadGuard<'a>,
+pub struct BitHandle<'a, A>
+where
+    A: Allocator,
+{
+    read_guard: ReadGuard<'a, A>,
     chunk_index: usize,
     bit_index: usize,
 }
 
-impl<'a> BitHandle<'a> {
+impl<'a, A> BitHandle<'a, A>
+where
+    A: Allocator,
+{
     /// Construct a new [`BitHandle`], acquiring a guard in the process
-    fn new(bit_map: &'a BitMap, index: usize) -> Self {
+    fn new(bit_map: &'a BitMap<A>, index: usize) -> Self {
         let (chunk_index, bit_index) = index_offset(index);
         Self {
             read_guard: ReadGuard::new(bit_map),
@@ -488,37 +516,39 @@ impl<'a> BitHandle<'a> {
     }
 
     /// Get the internal [`BitMap`]
-    fn bit_map(&self) -> &BitMap {
+    fn bit_map(&self) -> &BitMap<A> {
         self.read_guard.bit_map
     }
 
     /// Get the internal buf pointer for reads
-    fn buf(&self) -> &Unique<[AtomicBitChunk], DlMalloc> {
+    fn buf(&self) -> &Unique<[AtomicBitChunk], A> {
         // TODO: Safety
         unsafe { &*self.read_guard.bit_map.buf.get() }
     }
 
     /// Check that we can actually do stuff with this bit-handle. If we can't,
-    /// *temporarily* release this lock and realloc the [`BitMap`]'s buffer to 
+    /// *temporarily* release this lock and realloc the [`BitMap`]'s buffer to
     /// fit.
     fn ensure_index_exists(&self) {
-        thread_println!("ensure_index_exists()");
+        // putln!("ensure_index_exists()");
         if !self.bit_map().chunk_in_bounds(self.chunk_index) {
-            thread_println!(
-                "ensure_index_exists(): {} is not in bounds!",
-                self.chunk_index
-            );
-            thread_println!("ensure_index_exists(): dec_nr_readers()");
+            // putln!(
+            //     "ensure_index_exists(): ",
+            //     self.chunk_index,
+            //     " is not in bounds!",
+            // );
+            // putln!("ensure_index_exists(): dec_nr_readers()");
             self.bit_map().dec_nr_readers();
             while !self.bit_map().chunk_in_bounds(self.chunk_index) {
-                thread_println!(
-                    "ensure_index_exists(): {} is still not in bounds!",
-                    self.chunk_index
-                );
+                // putln!(
+                //     "ensure_index_exists(): ",
+                //     self.chunk_index,
+                //     " is still not in bounds!",
+                // );
                 self.bit_map().grow(self.chunk_index);
             }
+            self.bit_map().inc_nr_readers();
         }
-        self.bit_map().inc_nr_readers();
     }
 
     /// Set the bit at this index to `1`
@@ -535,10 +565,71 @@ impl<'a> BitHandle<'a> {
         self.buf().as_slice()[self.chunk_index]
             .fetch_and(!(1 << self.bit_index), Ordering::Release);
     }
+
+    /// Scan backward, starting at the current index, looking for a high bit.
+    /// Returns the number of steps taken, or `None` if no high bit exists.
+    pub fn scan_backward(self) -> Option<usize> {
+        if !self.bit_map().chunk_in_bounds(self.chunk_index) {
+            return None;
+        }
+
+        // We're storing in the order msb <- lsb. And we're walking *backwards*
+        // so we knock off all the stuff that is after the current index.
+        let current_unmasked = self.buf().as_slice()[self.chunk_index].load(Ordering::Acquire);
+        let current = current_unmasked << (BitChunk::BITS as usize - 1 - self.bit_index);
+        putln!(
+            "self.chunk_index, self.bit_index = ",
+            self.chunk_index,
+            ", ",
+            self.bit_index
+        );
+        putln!(
+            "current chunk (",
+            self.chunk_index,
+            "), unmasked, masked = ",
+            Bits::<64>::new(current_unmasked),
+            ", \n\t",
+            Bits::<64>::new(current),
+        );
+
+        let mut steps = if current == 0 {
+            // Nothing in this chunk, so we step backwards one extra (to get to
+            // the next chunk)
+            self.bit_index
+        } else {
+            // We mask self.bit_index bits, so let's do the example with 8 again
+            // 0b_????_???? mask 5
+            // 0b_???0_0000
+            // [5] -> 5 - 5 = 0 (correct!)
+            // [7] -> 7 - 5 = 2 (5, 6 correct!)
+            return Some(current.leading_zeros() as usize);
+        };
+
+        for chunk_index in (0..self.chunk_index).rev() {
+            let chunk = self.buf().as_slice()[chunk_index].load(Ordering::Acquire);
+            putln!(
+                "chunk_index = ",
+                chunk_index,
+                ", chunk = ",
+                Bits::<64>::new(chunk)
+            );
+            if chunk == 0 {
+                steps += BitChunk::MAX as usize;
+            } else {
+                putln!("trailing_zeros() = ", chunk.trailing_zeros() as usize);
+                return Some(steps + chunk.trailing_zeros() as usize);
+            }
+        }
+
+        None
+    }
 }
 
-pub struct BitMap {
-    buf: UnsafeCell<Unique<[AtomicBitChunk], DlMalloc>>,
+pub struct BitMap<A>
+where
+    A: Allocator,
+{
+    buf: UnsafeCell<Unique<[AtomicBitChunk], A>>,
     /// The length itself is obviously stored twice -- but this is actually
     /// quite convenient and not an issue, since we only have one `BitMap` for
     /// the whole program!
@@ -549,7 +640,10 @@ pub struct BitMap {
     nr_readers: Futex<Private>,
 }
 
-impl fmt::Debug for BitMap {
+impl<A> fmt::Debug for BitMap<A>
+where
+    A: Allocator,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         _ = self.acquire_read_guard();
         for chunk in unsafe { &*self.buf.get() }.as_slice() {
@@ -561,7 +655,7 @@ impl fmt::Debug for BitMap {
 }
 
 // TODO: Safety comment
-unsafe impl Sync for BitMap {}
+unsafe impl<A> Sync for BitMap<A> where A: Allocator {}
 
 /// This futex represents a lock and is unlocked
 const FUTEX_UNLOCKED: u32 = 0;
@@ -569,14 +663,18 @@ const FUTEX_UNLOCKED: u32 = 0;
 /// THis futex represents a lock and is locked
 const FUTEX_LOCKED: u32 = 1;
 
-impl BitMap {
+/// A thread-safe, locking-only-when-necessary bitmap
+impl<A> BitMap<A>
+where
+    A: Allocator,
+{
     /// # Safety
     ///
     /// `DlMalloc` must be registered as the global allocator *or* a `DlMalloc`
     /// derivative (e.g. `DlMallocMeta`)
-    pub const unsafe fn new() -> Self {
+    pub const unsafe fn new(allocator: A) -> Self {
         Self {
-            buf: UnsafeCell::new(Unique::empty_slice(DlMalloc::new())),
+            buf: UnsafeCell::new(Unique::empty_slice(allocator)),
             buf_len: AtomicUsize::new(0),
             writer_lock: Futex::new(FUTEX_UNLOCKED),
             nr_readers: Futex::new(0),
@@ -588,19 +686,19 @@ impl BitMap {
     /// so not really 'reads', but atomic writes too. This essentially just
     /// doest `inc_nr_readers()`
     /// reading.
-    pub fn acquire_read_guard(&self) -> ReadGuard {
-        thread_println!("acquire_read_guard()");
+    pub fn acquire_read_guard(&self) -> ReadGuard<A> {
+        // putln!("acquire_read_guard()");
         ReadGuard::new(self)
     }
 
     /// Acquire a reader lock that you have to manually release -- use
     /// `acquire_read_guard()` for a `Drop` guard instead.
     fn inc_nr_readers(&self) {
-        thread_println!("inc_nr_readers()");
+        // putln!("inc_nr_readers()");
         loop {
             // Fast path should stay in userspace!
             _ = self.writer_lock.wait(FUTEX_LOCKED);
-            thread_println!("inc_nr_readers(): finished waiting on writer_lock");
+            // putln!("inc_nr_readers(): finished waiting on writer_lock");
             // <-- [1]
             self.nr_readers.value.fetch_add(1, Ordering::Release);
             if self.writer_lock.value.load(Ordering::Acquire) == FUTEX_LOCKED {
@@ -611,7 +709,7 @@ impl BitMap {
             }
             break;
         }
-        thread_println!("inc_nr_readers(): finished");
+        // putln!("inc_nr_readers(): finished");
     }
 
     /// `dec_nr_readers()` is used to release a reader lock, and is carried out
@@ -622,11 +720,11 @@ impl BitMap {
     /// 2. If there are no more readers, wake the writer who is waiting on
     ///    readers. All other writers should be waiting on the `writer_lock`
     fn dec_nr_readers(&self) {
-        thread_println!("dec_nr_readers()");
-        thread_println!(
-            "dec_nr_readers(): start: nr_readers = {}",
-            self.nr_readers.value.load(Ordering::Acquire)
-        );
+        // putln!("dec_nr_readers()");
+        // putln!(
+        //     "dec_nr_readers(): start: nr_readers = ",
+        //     self.nr_readers.value.load(Ordering::Acquire) as usize
+        // );
         if self.nr_readers.value.fetch_sub(1, Ordering::Release) == 1 {
             // We could achieve a correct structure, just by waking everything
             // every time, but we do less syscalls if we only wake the writer
@@ -638,32 +736,32 @@ impl BitMap {
             // the woken writer genuinely does not have any contending readers).
             self.nr_readers.wake(1);
         }
-        thread_println!(
-            "dec_nr_readers(): end: nr_readers = {}",
-            self.nr_readers.value.load(Ordering::Acquire)
-        );
+        // putln!(
+        //     "dec_nr_readers(): end: nr_readers = ",
+        //     self.nr_readers.value.load(Ordering::Acquire) as usize
+        // );
     }
 
     /// Wait for all readers to finish whatever they're doing. You **must** have
     /// the `writer_lock` for this method to make sense.
     fn wait_on_readers(&self) {
-        thread_println!("wait_on_readers()");
+        // putln!("wait_on_readers()");
         // We know that `nr_readers` cannot increase again here, since the
         // caller has asserted they have the `writer_lock`, so we don't have to
         // worry about `inc_nr_readers()` inserting an evil instruction here
         loop {
             let nr_readers = self.nr_readers.value.load(Ordering::Acquire);
-            thread_println!("wait_on_readers(): nr_readers = {nr_readers}");
+            // putln!("wait_on_readers(): nr_readers = ", nr_readers as usize);
             if nr_readers == 0 {
                 // if nr_readers is already 0, we can safely break (it is capped
                 // at 0)
-                thread_println!("wait_on_readers(): nr_readers = 0, done waiting!");
+                // putln!("wait_on_readers(): nr_readers = 0, done waiting!");
                 break;
             }
             // Wait until we update nr_readers to something other than the
             // current value -- if the update was so fast that we never had any
             // futex contention, keep busywaiting, otherwise go to sleep
-            thread_println!("wait_on_readers(): nr_readers.wait_for_update()");
+            // putln!("wait_on_readers(): nr_readers.wait_for_update()");
             _ = self.nr_readers.wait(nr_readers);
         }
     }
@@ -674,8 +772,8 @@ impl BitMap {
     /// # Stuck
     ///
     /// - While the [`BitHandle`] exists!
-    pub fn get(&self, index: usize) -> BitHandle {
-        thread_println!("get({index})");
+    pub fn get(&self, index: usize) -> BitHandle<A> {
+        // thread_println!("get({index})");
         BitHandle::new(self, index)
     }
 
@@ -683,7 +781,7 @@ impl BitMap {
     /// in the current buffer, see struct-level documentation for the allocation
     /// strategy
     pub fn set_high(&self, index: usize) {
-        thread_println!("set_high({index})");
+        // thread_println!("set_high({index})");
         self.get(index).set_high();
     }
 
@@ -691,7 +789,7 @@ impl BitMap {
     /// in the current buffer, see struct-level documentation for the allocation
     /// strategy
     pub fn set_low(&self, index: usize) {
-        thread_println!("set_low({index})");
+        // thread_println!("set_low({index})");
         self.get(index).set_low();
     }
 
@@ -701,7 +799,7 @@ impl BitMap {
     /// keep retrying until this function returns `true`. Attempting to acquire
     /// the lock after a successful acquisition will result in deadlock.
     fn try_acquire_writer_lock(&self) -> bool {
-        thread_println!("try_acquire_writer_lock()");
+        // thread_println!("try_acquire_writer_lock()");
         // Try and acquire the lock, if successful, break;
         if let Ok(FUTEX_UNLOCKED) = self.writer_lock.value.compare_exchange(
             FUTEX_UNLOCKED,
@@ -710,7 +808,7 @@ impl BitMap {
             Ordering::Acquire,
         ) {
             fence(Ordering::Acquire);
-            thread_println!("try_acquire_writer_lock(): acquired lock");
+            // thread_println!("try_acquire_writer_lock(): acquired lock");
             true
         } else {
             // Wait, if the lock is acquired by another thread
@@ -741,15 +839,15 @@ impl BitMap {
     ///
     /// TODO: perhaps that growth strategy is not to be desired??
     pub fn grow(&self, to_fit_chunk_at: usize) {
-        thread_println!("grow({to_fit_chunk_at})");
+        // thread_println!("grow({to_fit_chunk_at})");
         let chunk_index = to_fit_chunk_at;
         loop {
             // We can only grow, so we know that this is definitely true
             if self.chunk_in_bounds(chunk_index) {
-                thread_println!("grow(): {chunk_index} already in bounds -- returning!");
+                // thread_println!("grow(): {chunk_index} already in bounds -- returning!");
                 return;
             }
-            thread_println!("grow(): try_acquire_writer_lock()");
+            // thread_println!("grow(): try_acquire_writer_lock()");
             // This is a continuation of the comments in
             // `try_acquire_writer_lock()`
             if self.try_acquire_writer_lock() {
@@ -757,14 +855,14 @@ impl BitMap {
                 break;
             }
         }
-        thread_println!("grow(): wait_on_readers()");
+        // thread_println!("grow(): wait_on_readers()");
         self.wait_on_readers();
 
         // SAFETY: We have exclusive access *and* no other references can exist
         // since we wait for all readers to finish.
         let buf = unsafe { &mut *self.buf.get() };
         let sz: usize = cmp::max(log2ceil(chunk_index as _) as _, 16);
-        thread_println!("grow(): buf.grow({sz})");
+        // thread_println!("grow(): buf.grow({sz})");
         // SAFETY:
         // - Checked if the `chunk_index` is in bounds
         // - Since it is not, it must be greater than the current capacity
@@ -776,5 +874,53 @@ impl BitMap {
         self.buf_len.store(buf.len(), Ordering::Relaxed);
 
         self.release_writer_lock();
+    }
+}
+
+const BUF_SIZE: usize = MAX_NR_CHARS_USIZE * 3
+    + "BitMap { ".len()
+    + "writer_lock: ,".len()
+    + "buf_len: ,".len()
+    + "nr_readers: ".len()
+    + " }".len()
+    + 32; // for good measure #secure
+
+impl<'a, A> AsciiRepr<'a> for BitMap<A>
+where
+    A: Allocator,
+{
+    type AsciiIter = ArrayIter<u8, BUF_SIZE>;
+
+    fn chars(&'a self) -> Self::AsciiIter {
+        let mut buf = Cursor::new([0; BUF_SIZE]);
+        _ = buf.write(b"BitMap { writer_lock: ");
+        write_usize(
+            &mut buf,
+            self.writer_lock.value.load(Ordering::Acquire) as usize,
+        );
+        _ = buf.write(b", nr_readers: ");
+        write_usize(
+            &mut buf,
+            self.nr_readers.value.load(Ordering::Acquire) as usize,
+        );
+        _ = buf.write(b", buf_len: ");
+        write_usize(&mut buf, self.buf_len.load(Ordering::Acquire));
+        _ = buf.write(b" }");
+        ArrayIter {
+            array: *buf.get_ref(),
+            i: 0,
+            end: buf.position() as usize + 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_offset;
+
+    #[test]
+    fn index_offset_works() {
+        assert_eq!(index_offset(42), (0, 42));
+        assert_eq!(index_offset(120), (1, 56));
     }
 }

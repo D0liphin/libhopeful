@@ -3,7 +3,10 @@ use std::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
     ffi::c_void,
     ptr::{self, NonNull},
+    sync::LazyLock,
 };
+
+use libc::sbrk;
 
 use crate::util::{
     assert::{aligned_to, non_null},
@@ -20,17 +23,28 @@ extern "C" {
     #[allow(unused)]
     pub(crate) fn dlrealloc(_: *mut c_void, _: c_size_t) -> *mut c_void;
 
+    #[allow(unused)]
     pub(crate) fn dlmemalign(_: c_size_t, _: c_size_t) -> *mut c_void;
 }
+
+/// sbrk(0), before any actual allocation calls are done
+/// TODO: wrap the whole thing in this if we ever extend this struct...
+/// `LazyLock::force()` is a bit rubbish
+pub static SBRK_START: LazyLock<usize> = LazyLock::new(|| unsafe { sbrk(0) as _ });
 
 /// A wrapper around `dlmalloc()`. Options are configured in
 /// `src/clib/dmalloc.c`. Implements both `GlobalAlloc` and `Allocator`. So you
 /// should use those as the API.
+#[derive(Clone, Copy)]
 pub struct DlMalloc(());
+
+// SAFETY: We don't actually use the `*mut c_void` for anything besides as a
+// `usize`... maybe we should jsut keep it like that!
+unsafe impl Sync for DlMalloc {}
 
 impl DlMalloc {
     /// The minimum alignment that `DlMalloc` allocates to
-    pub const MIN_ALIGN: usize = 8;
+    pub const MIN_ALIGN: usize = 16;
 
     /// Construct a new `DlMalloc` allocator. This is a no-op.
     ///
@@ -49,6 +63,7 @@ impl DlMalloc {
 
     /// Safe version of `dlmalloc()`. `dlfree()` has no safe counterpart.
     pub(crate) fn dlmalloc(&self, size: c_size_t) -> *mut c_void {
+        LazyLock::force(&SBRK_START);
         // SAFETY:
         // - Constructor has asserted that `DlMalloc` has complete ownership
         //   over the heap, so this will not interfere with anything else.
@@ -56,11 +71,13 @@ impl DlMalloc {
     }
 
     /// Safe version of `dlmemalign()`.
-    pub(crate) fn dlmemalign(&self, size: c_size_t, align: c_size_t) -> *mut c_void {
-        // SAFETY:
-        // - Constructor has asserted that `DlMalloc` has complete ownership
-        //   over the heap, so this will not interfere with anything else.
-        unsafe { dlmemalign(size, align) }
+    pub(crate) fn dlmemalign(&self, _size: c_size_t, _align: c_size_t) -> *mut c_void {
+        todo!("dlmemalign() is currently unsupported");
+        // LazyLock::force(&SBRK_START);
+        // // SAFETY:
+        // // - Constructor has asserted that `DlMalloc` has complete ownership
+        // //   over the heap, so this will not interfere with anything else.
+        // unsafe { dlmemalign(size, align) }
     }
 
     /// # Safety
@@ -68,6 +85,7 @@ impl DlMalloc {
     /// The safety requirements for this function are the same as those for
     /// `dlfree()` or `GlobalAlloc::deallocate()` -- whichever is stricter.
     pub(crate) unsafe fn dlfree(&self, data: *mut c_void) {
+        LazyLock::force(&SBRK_START);
         dlfree(data);
     }
 }

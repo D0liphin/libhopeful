@@ -3,30 +3,20 @@
 
 #![feature(allocator_api)]
 
-use std::{thread, time};
-
-use lhl::{
-    alloc::{bitvec::BitMap, dlmalloc::DlMalloc},
-    thread_println,
-};
+use lhl::alloc::{dlmalloc::DlMalloc, tracing::TracingAlloc};
 
 #[global_allocator]
-static DLMALLOC: DlMalloc = unsafe { DlMalloc::new() };
-
-static BIT_MAP: BitMap = unsafe { BitMap::new() };
+static GLOBAL: TracingAlloc<DlMalloc> =
+unsafe { TracingAlloc::new(DlMalloc::new(), DlMalloc::new()) };
 
 fn main() {
-    thread_println!("Hello, world!");
-    let guards = [BIT_MAP.acquire_read_guard(), BIT_MAP.acquire_read_guard()];
-    thread::Builder::new()
-        .name(String::from("reader-1"))
-        .spawn(|| {
-            thread::sleep(time::Duration::from_millis(2000));
-            thread_println!("thread::spawn()");
-            drop(guards);
-        })
-        .unwrap();
-    BIT_MAP.set_high(345);
-    BIT_MAP.set_high(344);
-    dbg!(&BIT_MAP);
+    let buf = vec![0u8; 220];
+    for ptr in [&buf[45], 56usize as *const u8, &buf[0]] {
+        if let Some(alloc_id) = GLOBAL.find(ptr) {
+            let offset = ptr as usize - alloc_id.ptr as usize;
+            println!("ptr is part of allocation {alloc_id:?}, offset by {offset} bytes");
+        } else {
+            println!("ptr is not part of any allocation");
+        }
+    }
 }
