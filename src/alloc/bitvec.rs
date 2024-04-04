@@ -530,21 +530,21 @@ where
     /// *temporarily* release this lock and realloc the [`BitMap`]'s buffer to
     /// fit.
     fn ensure_index_exists(&self) {
-        // putln!("ensure_index_exists()");
+        putln!("ensure_index_exists()");
         if !self.bit_map().chunk_in_bounds(self.chunk_index) {
-            // putln!(
-            //     "ensure_index_exists(): ",
-            //     self.chunk_index,
-            //     " is not in bounds!",
-            // );
-            // putln!("ensure_index_exists(): dec_nr_readers()");
+            putln!(
+                "ensure_index_exists(): ",
+                self.chunk_index,
+                " is not in bounds!",
+            );
+            putln!("ensure_index_exists(): dec_nr_readers()");
             self.bit_map().dec_nr_readers();
             while !self.bit_map().chunk_in_bounds(self.chunk_index) {
-                // putln!(
-                //     "ensure_index_exists(): ",
-                //     self.chunk_index,
-                //     " is still not in bounds!",
-                // );
+                putln!(
+                    "ensure_index_exists(): ",
+                    self.chunk_index,
+                    " is still not in bounds!",
+                );
                 self.bit_map().grow(self.chunk_index);
             }
             self.bit_map().inc_nr_readers();
@@ -614,7 +614,7 @@ where
                 Bits::<64>::new(chunk)
             );
             if chunk == 0 {
-                steps += BitChunk::MAX as usize;
+                steps += BitChunk::BITS as usize;
             } else {
                 putln!("trailing_zeros() = ", chunk.trailing_zeros() as usize);
                 return Some(steps + chunk.trailing_zeros() as usize);
@@ -668,6 +668,10 @@ impl<A> BitMap<A>
 where
     A: Allocator,
 {
+    /// The minimum size of the bitvec (in chunks)
+    /// TODO: increase to something less tiny
+    pub const MIN_CAPACITY: usize = 16;
+
     /// # Safety
     ///
     /// `DlMalloc` must be registered as the global allocator *or* a `DlMalloc`
@@ -694,11 +698,11 @@ where
     /// Acquire a reader lock that you have to manually release -- use
     /// `acquire_read_guard()` for a `Drop` guard instead.
     fn inc_nr_readers(&self) {
-        // putln!("inc_nr_readers()");
+        putln!("inc_nr_readers()");
         loop {
             // Fast path should stay in userspace!
             _ = self.writer_lock.wait(FUTEX_LOCKED);
-            // putln!("inc_nr_readers(): finished waiting on writer_lock");
+            putln!("inc_nr_readers(): finished waiting on writer_lock");
             // <-- [1]
             self.nr_readers.value.fetch_add(1, Ordering::Release);
             if self.writer_lock.value.load(Ordering::Acquire) == FUTEX_LOCKED {
@@ -709,7 +713,7 @@ where
             }
             break;
         }
-        // putln!("inc_nr_readers(): finished");
+        putln!("inc_nr_readers(): finished");
     }
 
     /// `dec_nr_readers()` is used to release a reader lock, and is carried out
@@ -720,11 +724,11 @@ where
     /// 2. If there are no more readers, wake the writer who is waiting on
     ///    readers. All other writers should be waiting on the `writer_lock`
     fn dec_nr_readers(&self) {
-        // putln!("dec_nr_readers()");
-        // putln!(
-        //     "dec_nr_readers(): start: nr_readers = ",
-        //     self.nr_readers.value.load(Ordering::Acquire) as usize
-        // );
+        putln!("dec_nr_readers()");
+        putln!(
+            "dec_nr_readers(): start: nr_readers = ",
+            self.nr_readers.value.load(Ordering::Acquire) as usize
+        );
         if self.nr_readers.value.fetch_sub(1, Ordering::Release) == 1 {
             // We could achieve a correct structure, just by waking everything
             // every time, but we do less syscalls if we only wake the writer
@@ -736,10 +740,10 @@ where
             // the woken writer genuinely does not have any contending readers).
             self.nr_readers.wake(1);
         }
-        // putln!(
-        //     "dec_nr_readers(): end: nr_readers = ",
-        //     self.nr_readers.value.load(Ordering::Acquire) as usize
-        // );
+        putln!(
+            "dec_nr_readers(): end: nr_readers = ",
+            self.nr_readers.value.load(Ordering::Acquire) as usize
+        );
     }
 
     /// Wait for all readers to finish whatever they're doing. You **must** have
@@ -751,17 +755,17 @@ where
         // worry about `inc_nr_readers()` inserting an evil instruction here
         loop {
             let nr_readers = self.nr_readers.value.load(Ordering::Acquire);
-            // putln!("wait_on_readers(): nr_readers = ", nr_readers as usize);
+            putln!("wait_on_readers(): nr_readers = ", nr_readers as usize);
             if nr_readers == 0 {
                 // if nr_readers is already 0, we can safely break (it is capped
                 // at 0)
-                // putln!("wait_on_readers(): nr_readers = 0, done waiting!");
+                putln!("wait_on_readers(): nr_readers = 0, done waiting!");
                 break;
             }
             // Wait until we update nr_readers to something other than the
             // current value -- if the update was so fast that we never had any
             // futex contention, keep busywaiting, otherwise go to sleep
-            // putln!("wait_on_readers(): nr_readers.wait_for_update()");
+            putln!("wait_on_readers(): nr_readers.wait_for_update()");
             _ = self.nr_readers.wait(nr_readers);
         }
     }
@@ -839,30 +843,30 @@ where
     ///
     /// TODO: perhaps that growth strategy is not to be desired??
     pub fn grow(&self, to_fit_chunk_at: usize) {
-        // thread_println!("grow({to_fit_chunk_at})");
+        putln!("grow(", to_fit_chunk_at, ")");
         let chunk_index = to_fit_chunk_at;
         loop {
             // We can only grow, so we know that this is definitely true
             if self.chunk_in_bounds(chunk_index) {
-                // thread_println!("grow(): {chunk_index} already in bounds -- returning!");
+                // putln!("grow(): {chunk_index} already in bounds -- returning!");
                 return;
             }
-            // thread_println!("grow(): try_acquire_writer_lock()");
+            putln!("grow(): try_acquire_writer_lock()");
             // This is a continuation of the comments in
             // `try_acquire_writer_lock()`
             if self.try_acquire_writer_lock() {
-                thread_println!("grow(): got writer_lock!");
+                putln!("grow(): got writer_lock!");
                 break;
             }
         }
-        // thread_println!("grow(): wait_on_readers()");
+        putln!("grow(): wait_on_readers()");
         self.wait_on_readers();
 
         // SAFETY: We have exclusive access *and* no other references can exist
         // since we wait for all readers to finish.
         let buf = unsafe { &mut *self.buf.get() };
-        let sz: usize = cmp::max(log2ceil(chunk_index as _) as _, 16);
-        // thread_println!("grow(): buf.grow({sz})");
+        let sz: usize = cmp::max(1 << log2ceil(chunk_index as u64 + 1), Self::MIN_CAPACITY);
+        putln!("grow(): buf.grow(", sz, ")");
         // SAFETY:
         // - Checked if the `chunk_index` is in bounds
         // - Since it is not, it must be greater than the current capacity

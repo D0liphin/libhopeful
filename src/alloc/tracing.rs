@@ -34,7 +34,7 @@ use std::{
     alloc::{Allocator, GlobalAlloc, Layout},
     cmp, mem,
     ptr::{self, NonNull},
-    sync::atomic::AtomicPtr,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
 use super::{
@@ -125,6 +125,7 @@ where
 {
     allocator: A,
     bit_map: BitMap<A>,
+    nr_allocations: AtomicUsize,
 }
 
 impl<A> TracingAlloc<A>
@@ -136,6 +137,7 @@ where
         Self {
             allocator,
             bit_map: BitMap::new(the_same_allocator),
+            nr_allocations: AtomicUsize::new(0),
         }
     }
 
@@ -147,6 +149,7 @@ where
         Some(bmi)
     }
 
+    /// TODO: Docs
     pub fn find<T>(&self, ptr: *const T) -> Option<AllocId> {
         let bit_map_index = self.get_bit_map_index(ptr)?;
         match self.bit_map.get(bit_map_index).scan_backward() {
@@ -174,6 +177,11 @@ where
             }
             None => None,
         }
+    }
+
+    /// TODO: Docs
+    pub fn nr_allocations(&self) -> usize {
+        self.nr_allocations.load(Ordering::Acquire)
     }
 }
 impl<A> TracingAlloc<A>
@@ -227,6 +235,7 @@ where
             .expect("Any valid allocation should be greater than min_vaddr");
         self.bit_map.set_high(index);
 
+        self.nr_allocations.fetch_add(1, Ordering::Release);
         data.as_mut()
     }
 
@@ -245,5 +254,6 @@ where
             unsafe { NonNull::new_unchecked(ptr).offset(-(header_size as isize)) },
             layout,
         );
+        self.nr_allocations.fetch_sub(1, Ordering::Release);
     }
 }
