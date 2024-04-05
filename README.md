@@ -3,6 +3,10 @@
 A simple logical heap layout visualizer. Actually the hope is for this
 to be much more than just a 'logical' visualizer.
 
+```rs
+
+```
+
 The idea is to hook into liballocs' existing allocator infrastructure. 
 As a result, *hopefully* we can visualise all allocations that 
 liballocs tracks. We might need to do some modifications, since I'm

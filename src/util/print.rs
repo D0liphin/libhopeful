@@ -191,6 +191,7 @@ macro_rules! put {
 #[macro_export]
 macro_rules! putln {
     ($($e:expr),*$(,)?) => {{
+        // use $crate::put;
         // _ = $crate::util::print::cout() $(<< &($e))*;
         // put!($crate::util::print::endl());
     }};

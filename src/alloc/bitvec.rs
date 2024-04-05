@@ -425,7 +425,7 @@ use std::{
     ffi::CStr,
     fmt,
     io::{Cursor, Write},
-    mem,
+    mem::{self, ManuallyDrop},
     sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -478,6 +478,10 @@ where
         bit_map.inc_nr_readers();
         Self { bit_map }
     }
+
+    fn new_unlocked(bit_map: &'a BitMap<A>) -> Self {
+        Self { bit_map }
+    }
 }
 
 impl<'a, A> Drop for ReadGuard<'a, A>
@@ -513,6 +517,19 @@ where
             chunk_index,
             bit_index,
         }
+    }
+
+    /// # Safety
+    ///
+    /// - methods that require synchronisation, no longer have that, since this
+    ///   index is unlocked, as a result you must provide that yourself
+    unsafe fn new_unsync(bit_map: &'a BitMap<A>, index: usize) -> ManuallyDrop<Self> {
+        let (chunk_index, bit_index) = index_offset(index);
+        ManuallyDrop::new(Self {
+            read_guard: ReadGuard::new_unlocked(bit_map),
+            chunk_index,
+            bit_index,
+        })
     }
 
     /// Get the internal [`BitMap`]
@@ -566,9 +583,7 @@ where
             .fetch_and(!(1 << self.bit_index), Ordering::Release);
     }
 
-    /// Scan backward, starting at the current index, looking for a high bit.
-    /// Returns the number of steps taken, or `None` if no high bit exists.
-    pub fn scan_backward(self) -> Option<usize> {
+    pub fn scan_backward_no_drop(&self) -> Option<usize> {
         if !self.bit_map().chunk_in_bounds(self.chunk_index) {
             return None;
         }
@@ -586,7 +601,7 @@ where
         putln!(
             "current chunk (",
             self.chunk_index,
-            "), unmasked, masked = ",
+            "), unmasked, masked = \n\t",
             Bits::<64>::new(current_unmasked),
             ", \n\t",
             Bits::<64>::new(current),
@@ -595,7 +610,7 @@ where
         let mut steps = if current == 0 {
             // Nothing in this chunk, so we step backwards one extra (to get to
             // the next chunk)
-            self.bit_index
+            self.bit_index + 1
         } else {
             // We mask self.bit_index bits, so let's do the example with 8 again
             // 0b_????_???? mask 5
@@ -616,12 +631,17 @@ where
             if chunk == 0 {
                 steps += BitChunk::BITS as usize;
             } else {
-                putln!("trailing_zeros() = ", chunk.trailing_zeros() as usize);
-                return Some(steps + chunk.trailing_zeros() as usize);
+                putln!("leading_zeros() = ", chunk.leading_zeros() as usize);
+                return Some(steps + chunk.leading_zeros() as usize);
             }
         }
 
         None
+    }
+    /// Scan backward, starting at the current index, looking for a high bit.
+    /// Returns the number of steps taken, or `None` if no high bit exists.
+    pub fn scan_backward(self) -> Option<usize> {
+        self.scan_backward_no_drop()
     }
 }
 
@@ -781,6 +801,16 @@ where
         BitHandle::new(self, index)
     }
 
+    /// Acquire a [`BitHandle`] in the same way as [`BitMap::get`], but the
+    /// handle has no guard properties
+    ///
+    /// # Safety
+    ///
+    /// - All methods on the [`BitHandle`] must be synchronised by the caller.
+    pub unsafe fn get_unsync(&self, index: usize) -> ManuallyDrop<BitHandle<A>> {
+        BitHandle::new_unsync(self, index)
+    }
+
     /// Set the bit at `index` to `1`, allocate extra space if we can't fit it
     /// in the current buffer, see struct-level documentation for the allocation
     /// strategy
@@ -802,7 +832,7 @@ where
     /// sound** to assume you have the lock unless `true` is returned. You must
     /// keep retrying until this function returns `true`. Attempting to acquire
     /// the lock after a successful acquisition will result in deadlock.
-    fn try_acquire_writer_lock(&self) -> bool {
+    pub fn try_acquire_writer_lock(&self) -> bool {
         // thread_println!("try_acquire_writer_lock()");
         // Try and acquire the lock, if successful, break;
         if let Ok(FUTEX_UNLOCKED) = self.writer_lock.value.compare_exchange(
@@ -822,7 +852,7 @@ where
     }
 
     /// I've finished writing... okay, other writers can write now!
-    fn release_writer_lock(&self) {
+    pub fn release_writer_lock(&self) {
         fence(Ordering::Release);
         self.writer_lock
             .value

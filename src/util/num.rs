@@ -14,6 +14,11 @@ pub fn log2ceil(n: u64) -> u32 {
     }
 }
 
+/// Round up `n` to the nearest `to`
+pub fn round_up(n: usize, to: usize) -> usize {
+    to * ((n + to - 1) / to)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,30 +3,26 @@
 
 #![feature(allocator_api)]
 
-use lhl::alloc::{dlmalloc::DlMalloc, tracing::TracingAlloc};
+use lhl::alloc::{
+    dlmalloc::DlMalloc,
+    tracing::{AllocId, FindPointerMethod, TracingAlloc},
+};
 
 #[global_allocator]
 static GLOBAL: TracingAlloc<DlMalloc> =
     unsafe { TracingAlloc::new(DlMalloc::new(), DlMalloc::new()) };
 
 fn main() {
-    let buf = vec![Box::new(0); 220];
-    for ptr in [
-        buf[45].as_ref() as *const _ as usize,
-        56usize,
-        buf[0].as_ref() as *const _ as usize + 3,
-    ] {
-        if let Some(alloc_id) = GLOBAL.find(ptr as *const ()) {
-            let offset = ptr - alloc_id.ptr as usize;
-            println!("ptr is part of allocation {alloc_id:?}, offset by {offset} bytes");
-        } else {
-            println!("ptr is not part of any allocation");
-        }
-    }
-    println!(
-        "there are currently {} allocations active",
-        GLOBAL.nr_allocations()
-    );
+let buf = [
+    Some(Box::new(0x12345678u32)),
+    None,
+    Some(Box::new(0xabababab)),
+    None,
+    Some(Box::new(0xcececece)),
+];
+let alloc_id = AllocId::from_sized(&buf);
+let ptrs = alloc_id.find_pointers(&GLOBAL, FindPointerMethod::AlignedHeapOnly);
+for ptr in ptrs {
+    println!("contains ptr --> {:?}", unsafe { ptr.id.read_unchecked() });
 }
-
-
+}

@@ -14,9 +14,10 @@
 )]
 
 pub mod alloc;
-mod lazy_lock;
-pub mod util;
 pub mod arch;
+mod lazy_lock;
+pub mod os;
+pub mod util;
 
 #[derive(Debug)]
 pub struct Foo {
