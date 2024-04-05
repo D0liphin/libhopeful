@@ -8,9 +8,12 @@ use std::{
 
 use libc::sbrk;
 
-use crate::util::{
-    assert::{aligned_to, non_null},
-    hint::cold,
+use crate::{
+    putln,
+    util::{
+        assert::{aligned_to, non_null},
+        hint::cold,
+    },
 };
 
 #[link(name = "dlmalloc", kind = "static")]
@@ -71,13 +74,12 @@ impl DlMalloc {
     }
 
     /// Safe version of `dlmemalign()`.
-    pub(crate) fn dlmemalign(&self, _size: c_size_t, _align: c_size_t) -> *mut c_void {
-        todo!("dlmemalign() is currently unsupported");
-        // LazyLock::force(&SBRK_START);
-        // // SAFETY:
-        // // - Constructor has asserted that `DlMalloc` has complete ownership
-        // //   over the heap, so this will not interfere with anything else.
-        // unsafe { dlmemalign(size, align) }
+    pub(crate) fn dlmemalign(&self, size: c_size_t, align: c_size_t) -> *mut c_void {
+        LazyLock::force(&SBRK_START);
+        // SAFETY:
+        // - Constructor has asserted that `DlMalloc` has complete ownership
+        //   over the heap, so this will not interfere with anything else.
+        unsafe { dlmemalign(size, align) }
     }
 
     /// # Safety
@@ -92,11 +94,19 @@ impl DlMalloc {
 
 unsafe impl Allocator for DlMalloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        putln!(
+            "DlMalloc::allocate(size: ",
+            layout.size(),
+            ", align: ",
+            layout.align(),
+            ")"
+        );
         let data = if layout.align() <= DlMalloc::MIN_ALIGN {
             self.dlmalloc(layout.size())
         } else {
             cold(|| self.dlmemalign(layout.size(), layout.align()))
         };
+        putln!("DlMalloc::allocate() -> ", data as usize);
 
         if !data.is_null() {
             Ok(cold(|| {

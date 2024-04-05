@@ -8,6 +8,12 @@ description = "Logical heap visualisation in Rust"
 ahash = "0.8.11"
 bytemuck = { version = "1.14.3", features = ["zeroable_atomics"] }
 crossbeam = "0.8.4"
+dlmalloc = { version = "0.2.6", features = ["global"] }
+eframe = "0.27.2"
+egui = "0.27.2"
+egui_extras = "0.27.2"
+egui_node_graph = "0.4.0"
+env_logger = "0.11.3"
 hashbrown = "0.14.3"
 libc = "0.2.153"
 linux-futex = "0.2.0"

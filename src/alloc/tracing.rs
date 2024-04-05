@@ -436,6 +436,10 @@ where
             data.cast::<u8>()
                 .add(header_size - mem::size_of::<TracingAllocHeader>())
         };
+        putln!(
+            "TracingAlloc::alloc(): header_ptr = ",
+            header_ptr.as_ptr() as usize
+        );
 
         // SAFETY: This is always going to be aligned for dlmalloc, but we don't
         //         know that this is dlmalloc!
