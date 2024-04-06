@@ -21,11 +21,14 @@
 //! let n = 5;
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     alloc::manual::AllocatorExt,
     arch::mem::{memcpy_maybe_garbage, usize_load_acq},
     os::mem::StackAlloc,
     put, putln,
+    serialize::serde_usize,
     util::num::round_up,
 };
 use std::{
@@ -41,18 +44,27 @@ use super::{
     dlmalloc::{DlMalloc, SBRK_START},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(C)]
 pub struct AllocId {
+    /// Where is this allocation?
+    #[serde(with = "serde_usize")]
     pub ptr: *const (),
+    /// How big is it?
     pub size: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct PtrMeta {
+    /// What allocation does the pointer point to?
     pub id: AllocId,
-    pub offset: usize,
+    /// Where is this pointer?
+    #[serde(with = "serde_usize")]
+    pub address: *const *const (),
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct HexDump {
     buf: Vec<u8>,
 }
@@ -76,10 +88,29 @@ impl fmt::Debug for HexDump {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FindPointerMethod {
     /// Find pointers that are aligned to `align_of::<usize>()` only, only
     /// searching on the heap
     AlignedHeapOnly,
+}
+
+pub struct FindPointersUncheckedResult<'a>(
+    Option<(usize, Box<[MaybeUninit<PtrMeta>], &'a StackAlloc>)>,
+);
+
+impl FindPointersUncheckedResult<'_> {
+    /// Convert this to a `Vec<PtrMeta>` -- you **mutst not have the GHL** or
+    /// this will hang forever
+    pub fn to_vec(self) -> Vec<PtrMeta> {
+        let Some((i, buf)) = self.0 else {
+            return Vec::new();
+        };
+        // SAFETY: Each case marks `i` as the next uninit element, with all
+        // prior elements initialized.
+        let init_buf: &[PtrMeta] = unsafe { transmute(&buf.as_ref()[0..i]) };
+        Vec::from_iter(init_buf.iter().copied())
+    }
 }
 
 impl AllocId {
@@ -88,6 +119,64 @@ impl AllocId {
             ptr: ptr as *const T as *const (),
             size: mem::size_of::<T>(),
         }
+    }
+
+    /// `find_pointers()`, but without first acquiring the GHL,
+    ///
+    /// # Safety
+    ///
+    /// For this method to be safe, you must have the GHL for the entire
+    /// duration
+    pub unsafe fn find_pointers_unchecked<'b, A>(
+        &self,
+        alloc: &'b StackAlloc,
+        global: &TracingAlloc<A>,
+        method: FindPointerMethod,
+    ) -> FindPointersUncheckedResult<'b>
+    where
+        A: Allocator + FlatAllocator,
+    {
+        let mut buf: Box<[MaybeUninit<PtrMeta>], &StackAlloc> =
+            Box::new_uninit_slice_in(self.size / mem::size_of::<*const ()>(), alloc);
+        let mut i = 0usize;
+
+        putln!("allocated Box<[]>");
+
+        match method {
+            FindPointerMethod::AlignedHeapOnly => {
+                let p = {
+                    let u8_ptr = self.ptr as *const u8;
+                    let delta = round_up(self.ptr as usize, mem::align_of::<*const ()>())
+                        - self.ptr as usize;
+                    if delta >= self.size {
+                        return FindPointersUncheckedResult(None);
+                    }
+                    // SAFETY: This is guaranteed to be in the same allocation
+                    // because of the above check
+                    (unsafe { u8_ptr.add(delta) }) as *const usize
+                };
+                putln!("p start = ", p as usize);
+                for p_offset in 0..buf.len() {
+                    // SAFETY: buf.len() is floor(sizeof(alloc) / 4) so this
+                    // should be exactly the number of pointer-aligned values in
+                    // the allocation
+                    let ptr_maybe_ptr = unsafe { p.add(p_offset) };
+                    let maybe_ptr = unsafe { usize_load_acq(ptr_maybe_ptr) as *const () };
+                    putln!("maybe_ptr = ", maybe_ptr as usize);
+                    // SAFETY: we have the GHL
+                    if let Some(id) = unsafe { global.find_unchecked(maybe_ptr) } {
+                        putln!("twas a ptr");
+                        buf[i] = MaybeUninit::new(PtrMeta {
+                            id,
+                            address: ptr_maybe_ptr as *const *const (),
+                        });
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        FindPointersUncheckedResult(Some((i, buf)))
     }
 
     /// Find all the pointers in an allocation, this returns a bunch of
@@ -116,57 +205,19 @@ impl AllocId {
         putln!("find_pointers()");
         let ghl = global.acquire_global_heap_lock();
         putln!("find_pointers(): acquired GHL");
+
         let alloc = StackAlloc::new(
             mem::size_of::<PtrMeta>() * (self.size / mem::size_of::<*const ()>())
                 + mem::align_of::<PtrMeta>(),
         ); //   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
            //   This bit is absolutely unnecessary... uhh I really should remove
            //   it and prove the size is correct instead
-        let alloc = &alloc;
-        let mut buf: Box<[MaybeUninit<PtrMeta>], &StackAlloc> =
-            Box::new_uninit_slice_in(self.size / mem::size_of::<*const ()>(), alloc);
-        let mut i = 0usize;
 
-        putln!("allocated Box<[]>");
-
-        match method {
-            FindPointerMethod::AlignedHeapOnly => {
-                let p = {
-                    let u8_ptr = self.ptr as *const u8;
-                    let delta = round_up(self.ptr as usize, mem::align_of::<*const ()>())
-                        - self.ptr as usize;
-                    if delta >= self.size {
-                        return Vec::new();
-                    }
-                    // SAFETY: This is guaranteed to be in the same allocation
-                    // because of the above check
-                    (unsafe { u8_ptr.add(delta) }) as *const usize
-                };
-                putln!("p start = ", p as usize);
-                for p_offset in 0..buf.len() {
-                    // SAFETY: buf.len() is floor(sizeof(alloc) / 4) so this
-                    // should be exactly the number of pointer-aligned values in
-                    // the allocation
-                    let ptr_maybe_ptr = unsafe { p.add(p_offset) };
-                    let maybe_ptr = unsafe { usize_load_acq(ptr_maybe_ptr) as *const () };
-                    putln!("maybe_ptr = ", maybe_ptr as usize);
-                    // SAFETY: we have the GHL
-                    if let Some(id) = unsafe { global.find_unchecked(maybe_ptr) } {
-                        putln!("twas a ptr");
-                        let offset = ptr_maybe_ptr as usize - self.ptr as usize;
-                        buf[i] = MaybeUninit::new(PtrMeta { id, offset });
-                        i += 1;
-                    }
-                }
-            }
-        }
+        // SAFETY: Acquired GHL
+        let result = unsafe { self.find_pointers_unchecked(&alloc, global, method) };
 
         drop(ghl);
-
-        // SAFETY: Each case marks `i` as the next uninit element, with all
-        // prior elements initialized.
-        let init_buf: &[PtrMeta] = unsafe { transmute(&buf.as_ref()[0..i]) };
-        Vec::from_iter(init_buf.iter().copied())
+        result.to_vec()
     }
 
     /// Read the bytes of this allocation, without stopping the world or any of
@@ -175,6 +226,8 @@ impl AllocId {
     /// # Safety
     ///
     /// - performs a [`memcpy_maybe_garbage()`] so follow the guide for that
+    /// - If you have the GHL, this is probably safe, if your [`AllocId`] is
+    ///   untouched
     pub unsafe fn read_unchecked(&self) -> HexDump {
         let mut buf = vec![0u8; self.size];
         unsafe {
@@ -321,7 +374,10 @@ impl<A> TracingAlloc<A>
 where
     A: Allocator + FlatAllocator,
 {
-    /// TODO: Safety
+    /// # Safety
+    ///
+    /// - Currently only `DlMalloc` is supported. That being said --
+    ///   `dlmalloc()` is not safe.
     pub const unsafe fn new(allocator: A, the_same_allocator: A) -> Self {
         Self {
             allocator,
@@ -497,268 +553,3 @@ where
         self.nr_allocations.fetch_sub(1, Ordering::Release);
     }
 }
-
-/*
-alloc(size: 21, align: 1, header_size: 16)
-header_ptr = 106066436763664|5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-ensure_index_exists(): 0 is not in bounds!
-ensure_index_exists(): dec_nr_readers()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-ensure_index_exists(): 0 is still not in bounds!
-grow(0)
-grow(): try_acquire_writer_lock()
-grow(): got writer_lock!
-grow(): wait_on_readers()
-wait_on_readers(): nr_readers = 0
-wait_on_readers(): nr_readers = 0, done waiting!
-grow(): buf.grow(16)
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 64, align: 8, header_size: 16)
-header_ptr = 106066436763840|48 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436763920|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 176, align: 8, header_size: 16)
-header_ptr = 106066436763952|160 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764144|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764176|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764208|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764240|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764272|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764304|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764336|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764368|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764400|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764432|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764464|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764496|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764528|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764560|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764592|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764624|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436764656|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-ensure_index_exists(): 16 is not in bounds!
-ensure_index_exists(): dec_nr_readers()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-ensure_index_exists(): 16 is still not in bounds!
-grow(16)
-grow(): try_acquire_writer_lock()
-grow(): got writer_lock!
-grow(): wait_on_readers()
-wait_on_readers(): nr_readers = 0
-wait_on_readers(): nr_readers = 0, done waiting!
-grow(): buf.grow(32)
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436763696|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-alloc(size: 20, align: 4, header_size: 16)
-header_ptr = 106066436763728|4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-ensure_index_exists()
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-inc_nr_readers()
-inc_nr_readers(): finished waiting on writer_lock
-inc_nr_readers(): finished
-self.chunk_index, self.bit_index = 6, 32
-current chunk (6), unmasked, masked = 0000000000000000000000000000000000000000000000000000000000000000,
-        0000000000000000000000000000000000000000000000000000000000000000
-chunk_index = 5, chunk = 1000000000000000000000000000000000000000000000000000000000000000
-trailing_zeros() = 0
-dec_nr_readers()
-dec_nr_readers(): start: nr_readers = 1
-dec_nr_readers(): end: nr_readers = 0
-found in 32 steps
-find(): header_ptr = 106066436764016
-[examples/tests.rs:18:5] alloc_id = AllocId {
-    ptr: 0x0000607784493180,
-    size: 106066436764352,
-}
-find_pointers()
-find_pointers(): acquired GHL
-StackAlloc::new(2545594482344456)
-alloc(size: 44, align: 1, header_size: 16)
-header_ptr = 106066436763760|28 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-inc_nr_readers()
-*/

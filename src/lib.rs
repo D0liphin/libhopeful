@@ -10,7 +10,8 @@
     slice_ptr_len,
     slice_ptr_get,
     non_null_convenience,
-    pointer_is_aligned
+    pointer_is_aligned,
+    isqrt
 )]
 
 pub mod alloc;
@@ -18,6 +19,8 @@ pub mod arch;
 mod lazy_lock;
 pub mod os;
 pub mod util;
+pub mod graph;
+pub mod serialize;
 
 #[derive(Debug)]
 pub struct Foo {
