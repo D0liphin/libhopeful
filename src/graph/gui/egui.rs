@@ -7,7 +7,7 @@ use egui::{
 };
 use egui_graphs::{
     DefaultEdgeShape, DefaultNodeShape, DisplayNode, Graph, GraphView, NodeProps,
-    SettingsInteraction, SettingsNavigation,
+    SettingsInteraction, SettingsNavigation, SettingsStyle,
 };
 use hashbrown::{HashMap, HashSet};
 use petgraph::{graph::NodeIndex, stable_graph::StableGraph, Directed};
@@ -37,7 +37,7 @@ impl AllocNodeShape {
         // pi * r**2 = area
         // (area / pi).sqrt() = r
         let area = alloc_id.size as f32 * 32.;
-        (area / PI).sqrt()
+        (area / PI).sqrt().sqrt() * 8.
     }
 
     pub(crate) fn width_including_padding_of(alloc_id: &AllocId) -> f32 {
@@ -84,10 +84,10 @@ impl DisplayNode<AllocNodePayload, (), Directed, u32> for AllocNodeShape {
         let circle_shape = CircleShape {
             center: circle_center,
             radius: circle_radius,
-            fill: Color32::from_rgb(0, 51, 153),
+            fill: Color32::from_rgb(255 - cmp::min(self.payload.alloc_id.size, 255) as u8, 200, cmp::min(255, self.payload.alloc_id.size) as u8),
             stroke: Stroke {
-                width: 2.,
-                color: Color32::WHITE,
+                width: 3.,
+                color: Color32::BLACK,
             },
         };
         res.push(circle_shape.into());
@@ -96,7 +96,7 @@ impl DisplayNode<AllocNodePayload, (), Directed, u32> for AllocNodeShape {
             f.layout_no_wrap(
                 format!("{}", self.payload.alloc_id.size),
                 FontId::new(circle_radius, FontFamily::Monospace),
-                Color32::WHITE,
+                Color32::BLACK,
             )
         });
 
@@ -104,7 +104,7 @@ impl DisplayNode<AllocNodePayload, (), Directed, u32> for AllocNodeShape {
             circle_center.x - galley.size().x / 2.,
             circle_center.y - circle_radius + galley.size().y / 2.,
         );
-        let label_shape = TextShape::new(label_pos, galley, Color32::WHITE);
+        let label_shape = TextShape::new(label_pos, galley, Color32::BLACK);
         res.push(label_shape.into());
 
         res
@@ -137,8 +137,9 @@ fn page_size_px(node_size: f32) -> f32 {
 pub enum AllocGraphNodeLayout {
     /// A random layout, scaled by the provided scalar
     Random(f32),
-    /// A layout optimised for tree-like structures
-    Tree,
+    /// A layout optimised for tree-like structures, the scalar here is for the
+    /// y-axis
+    Tree(f32),
 }
 
 impl HeapViewApp {
@@ -147,6 +148,8 @@ impl HeapViewApp {
         alloc_graph: AllocGraph,
         layout: AllocGraphNodeLayout,
     ) -> Self {
+        cc.egui_ctx.style_mut(|style| style.visuals.widgets.inactive.fg_stroke = Stroke::new(2f32, Color32::from_rgb(80, 80, 80)));
+
         let mut graph = StableGraph::<AllocNodePayload, ()>::new();
 
         let mut nodes_by_page: HashMap<usize, HashSet<NodeIndex<u32>>> = HashMap::new();
@@ -204,7 +207,7 @@ impl HeapViewApp {
                     node.set_location(node.location() * scalar);
                 }
             }
-            AllocGraphNodeLayout::Tree => {
+            AllocGraphNodeLayout::Tree(scalar) => {
                 // TODO: handle cycles in alloc_graph.roots()
                 let mut levels: Vec<Vec<AllocId>> = Vec::new();
                 let mut unvisited =
@@ -248,7 +251,7 @@ impl HeapViewApp {
                         let node = graph
                             .node_mut(nodes[alloc_id])
                             .expect("all nodes in `nodes` should exist in the graph");
-                        node.set_location(Pos2::new(x, level as f32 * 128.));
+                        node.set_location(Pos2::new(x, level as f32 * 50. * scalar));
                         x += AllocNodeShape::width_including_padding_of(alloc_id);
                     }
                 }
@@ -261,17 +264,40 @@ impl HeapViewApp {
 
 impl eframe::App for HeapViewApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add(
-                &mut HeapGraphView::new(&mut self.graph)
-                    .with_interactions(
-                        &SettingsInteraction::new()
-                            .with_dragging_enabled(true)
-                            .with_edge_clicking_enabled(true),
-                    )
-                    .with_navigations(&SettingsNavigation::new().with_zoom_and_pan_enabled(true)),
-            );
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame {
+                inner_margin: egui::style::Margin {
+                    left: 10.,
+                    right: 10.,
+                    top: 10.,
+                    bottom: 10.,
+                },
+                outer_margin: egui::style::Margin::default(),
+                rounding: egui::Rounding {
+                    nw: 1.0,
+                    ne: 1.0,
+                    sw: 1.0,
+                    se: 1.0,
+                },
+                shadow: eframe::epaint::Shadow::NONE,
+                fill: Color32::WHITE,
+                stroke: egui::Stroke::new(2.0, Color32::GOLD),
+            })
+            .show(ctx, |ui| {
+                ui.add(
+                    &mut HeapGraphView::new(&mut self.graph)
+                        .with_interactions(
+                            &SettingsInteraction::new()
+                                .with_dragging_enabled(true)
+                                .with_edge_clicking_enabled(true),
+                        )
+                        .with_navigations(
+                            &SettingsNavigation::new()
+                                .with_zoom_and_pan_enabled(true)
+                                .with_fit_to_screen_enabled(false),
+                        ),
+                );
+            });
     }
 }
 

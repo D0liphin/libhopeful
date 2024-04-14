@@ -6,7 +6,14 @@ use std::{
     slice,
 };
 
-use crate::util::{assert::non_null, hint::cold};
+use crate::{
+    externc::LHLMALLOC,
+    util::{
+        assert::non_null,
+        hint::cold,
+        print::{cout, endl},
+    },
+};
 
 // pub(crate) mod c {
 //     use core::ffi::{c_size_t, c_void};
@@ -452,6 +459,13 @@ where
         match unsafe { self.grow(ptr, old_layout, new_layout) } {
             Ok(data) => data,
             Err(e) => {
+                // putln!("average alloc size before dying = ", LHLMALLOC.bitmap);
+                _ = cout()
+                    << &"avg alloc size = "
+                    << &LHLMALLOC.min_heap_size()
+                    << &" "
+                    << &LHLMALLOC.nr_allocations()
+                    << &endl();
                 panic!("Got an `AllocError` when trying to grow(): {e:?}");
             }
         }

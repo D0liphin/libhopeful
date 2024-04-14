@@ -10,7 +10,10 @@ use libc::{
     MAP_NORESERVE, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
 
-use crate::{putln, util::{hint::cold, num::round_up}};
+use crate::{
+    putln,
+    util::{hint::cold, num::round_up},
+};
 
 static PAGE_SIZE: LazyLock<usize> = LazyLock::new(page_size::get);
 

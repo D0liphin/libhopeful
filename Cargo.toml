@@ -32,3 +32,6 @@ cc = "1.0.90"
 [profile.rg]
 inherits = "release"
 debug = true
+
+# [lib]
+# crate-type = ["staticlib"]

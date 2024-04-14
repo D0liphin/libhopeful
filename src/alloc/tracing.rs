@@ -21,6 +21,7 @@
 //! let n = 5;
 //! ```
 
+use crossbeam::epoch::Atomic;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -342,6 +343,7 @@ where
     allocator: A,
     bit_map: BitMap<A>,
     nr_allocations: AtomicUsize,
+    total_size: AtomicUsize,
 }
 
 impl<A> TracingAlloc<A>
@@ -383,6 +385,7 @@ where
             allocator,
             bit_map: BitMap::new(the_same_allocator),
             nr_allocations: AtomicUsize::new(0),
+            total_size: AtomicUsize::new(0),
         }
     }
 
@@ -453,6 +456,11 @@ where
     pub fn nr_allocations(&self) -> usize {
         self.nr_allocations.load(Ordering::Acquire)
     }
+
+    /// The minimum heap size to allocate all the objects on this heap
+    pub fn min_heap_size(&self) -> usize {
+        self.total_size.load(Ordering::Acquire)
+    }
 }
 impl<A> TracingAlloc<A>
 where
@@ -464,11 +472,25 @@ where
     }
 }
 
+unsafe impl<A> GlobalAlloc for &'static TracingAlloc<A>
+where
+    A: Allocator + FlatAllocator,
+{
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        <TracingAlloc<A> as GlobalAlloc>::alloc(*self, layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        <TracingAlloc<A> as GlobalAlloc>::dealloc(*self, ptr, layout)
+    }
+}
+
 unsafe impl<A> GlobalAlloc for TracingAlloc<A>
 where
     A: Allocator + FlatAllocator,
 {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        self.total_size.fetch_add(layout.size(), Ordering::Release);
         let header = TracingAllocHeader {
             metadata: AtomicPtr::new(ptr::null_mut()),
             size: layout.size(),
@@ -510,14 +532,14 @@ where
         let mut data = unsafe { data.cast::<u8>().add(header_size) };
         debug_assert!(data.is_aligned_to(layout.align()));
 
-        put!("header_ptr = ", header_ptr.as_ptr() as usize, "|");
-        for i in 0..16 {
-            put!(
-                unsafe { header_ptr.cast::<u8>().add(i) }.as_ptr().read() as usize,
-                " "
-            );
-        }
-        putln!("");
+        // put!("header_ptr = ", header_ptr.as_ptr() as usize, "|");
+        // for i in 0..16 {
+        //     put!(
+        //         unsafe { header_ptr.cast::<u8>().add(i) }.as_ptr().read() as usize,
+        //         " "
+        //     );
+        // }
+        // putln!("");
 
         let index = self
             .get_bit_map_index(data.as_mut())
@@ -540,6 +562,7 @@ where
         // allocator... I think)
         debug_assert!(ptr.is_aligned_to(layout.align()));
         debug_assert!(!ptr.is_null());
+        self.total_size.fetch_sub(layout.size(), Ordering::Release);
 
         let (header_size, layout) = TracingAllocHeader::layout_with_header(layout);
         // SAFETY: Caller asserts this is a valid pointer allocated by this

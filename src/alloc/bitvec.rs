@@ -886,6 +886,7 @@ where
             // `try_acquire_writer_lock()`
             if self.try_acquire_writer_lock() {
                 putln!("grow(): got writer_lock!");
+                self.release_writer_lock();
                 break;
             }
         }

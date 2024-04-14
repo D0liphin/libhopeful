@@ -21,6 +21,7 @@ pub mod os;
 pub mod util;
 pub mod graph;
 pub mod serialize;
+pub mod externc;
 
 #[derive(Debug)]
 pub struct Foo {

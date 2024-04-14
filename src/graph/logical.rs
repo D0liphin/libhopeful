@@ -36,11 +36,11 @@ impl AllocEdge {
     }
 }
 
-/// This is a no-op
 ///
 /// # Safety
 ///
 /// - `&T` and `&U` must be safely castable back and forth
+/// This is a no-op
 unsafe fn cast_vec<T, U>(v: Vec<T>) -> Vec<U> {
     let mut v = ManuallyDrop::new(v);
     Vec::from_raw_parts(v.as_mut_ptr() as *mut U, v.len(), v.capacity())
@@ -118,6 +118,22 @@ impl AllocGraph {
         // SAFETY: TODO
         unsafe {
             graph.init_from_alloc(global, alloc_id, find_ptr_method);
+        }
+        graph
+    }
+
+    pub unsafe fn from_alloc_id<A>(
+        global: &TracingAlloc<A>,
+        alloc_id: &AllocId,
+        find_ptr_method: FindPointerMethod,
+    ) -> Self
+    where
+        A: Allocator + FlatAllocator,
+    {
+        let mut graph = Self::new();
+        // SAFETY: TODO
+        unsafe {
+            graph.init_from_alloc(global, *alloc_id, find_ptr_method);
         }
         graph
     }
